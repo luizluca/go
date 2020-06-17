@@ -6,6 +6,8 @@ package x509
 
 import (
 	"bytes"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
 	"fmt"
 	"net"
@@ -512,6 +514,34 @@ func matchDomainConstraint(domain, constraint string) (bool, error) {
 	return true, nil
 }
 
+func matchDirNameConstraint(dirname pkix.RDNSequence, constraint pkix.RDNSequence) (bool, error) {
+
+	if len(constraint) > len(dirname) {
+		return false, nil
+	}
+	for i, rdn := range constraint {
+		if len(rdn) > len(dirname[i]) {
+			return false, nil
+		}
+		for j, const_tv := range rdn {
+			dirname_tv := dirname[i][j]
+			if len(const_tv.Type) != len(dirname_tv.Type) {
+				return false, nil
+			}
+			for k, _ := range const_tv.Type {
+				if const_tv.Type[k] != dirname_tv.Type[k] {
+					return false, nil
+				}
+			}
+			if const_tv.Value != dirname_tv.Value {
+				return false, nil
+			}
+		}
+	}
+
+	return true, nil
+}
+
 // checkNameConstraints checks that c permits a child certificate to claim the
 // given name, of type nameType. The argument parsedName contains the parsed
 // form of name, suitable for passing to the match function. The total number
@@ -619,6 +649,26 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 	}
 
 	checkNameConstraints := (certType == intermediateCertificate || certType == rootCertificate) && c.hasNameConstraints()
+	if checkNameConstraints {
+		for _, cert := range currentChain {
+			var subject pkix.RDNSequence
+
+			// cert.Subject.ToRDNSequence cannot be used as it ignores unknown RDN
+			if rest, err := asn1.Unmarshal(cert.RawSubject, &subject); err != nil {
+				return err
+			} else if len(rest) != 0 {
+				return errors.New("x509: trailing data after X.509 subject")
+			}
+
+			if err := c.checkNameConstraints(&comparisonCount, maxConstraintComparisons, "directory Name", cert.Subject.String(), subject,
+				func(parsedName, constraint interface{}) (bool, error) {
+					return matchDirNameConstraint(parsedName.(pkix.RDNSequence), constraint.(pkix.RDNSequence))
+				}, c.PermittedDirNames, c.ExcludedDirNames); err != nil {
+				return err
+			}
+		}
+	}
+
 	if checkNameConstraints && leaf.commonNameAsHostname() {
 		// This is the deprecated, legacy case of depending on the commonName as
 		// a hostname. We don't enforce name constraints against the CN, but
